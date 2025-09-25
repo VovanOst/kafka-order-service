@@ -1,0 +1,35 @@
+# Dockerfile.producer
+
+# Stage 1: Build
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /app
+
+# Установить зависимости для Alpine
+RUN apk add --no-cache git
+
+# Копируем модули и качаем зависимости
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Копируем исходники и миграции
+COPY . ./
+
+# Сборка бинарника producer
+RUN CGO_ENABLED=0 GOOS=linux go build -o producer ./cmd/producer
+
+# Stage 2: Runtime
+FROM alpine:latest
+
+WORKDIR /app
+
+# Копируем бинарник и миграции
+COPY --from=builder /app/producer ./producer
+COPY --from=builder /app/migrations ./migrations
+
+# Необходимые сертификаты для HTTPS при необходимости
+RUN apk add --no-cache ca-certificates
+
+EXPOSE 8080
+
+ENTRYPOINT ["./producer"]

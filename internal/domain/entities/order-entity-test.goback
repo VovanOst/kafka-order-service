@@ -1,0 +1,294 @@
+package entities
+
+import (
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestNewOrder(t *testing.T) {
+	customerID := uuid.New()
+	email := "test@example.com"
+
+	order := NewOrder(customerID, email)
+
+	assert.NotEqual(t, uuid.Nil, order.ID)
+	assert.Equal(t, customerID, order.CustomerID)
+	assert.Equal(t, email, order.Email)
+	assert.Equal(t, OrderStatusPending, order.Status)
+	assert.Equal(t, "USD", order.Currency)
+	assert.Equal(t, 0.0, order.TotalAmount)
+	assert.Empty(t, order.Items)
+	assert.NotNil(t, order.Metadata)
+	assert.WithinDuration(t, time.Now(), order.CreatedAt, time.Second)
+	assert.WithinDuration(t, time.Now(), order.UpdatedAt, time.Second)
+}
+
+func TestOrder_AddItem(t *testing.T) {
+	order := NewOrder(uuid.New(), "test@example.com")
+	productID := uuid.New()
+
+	order.AddItem(productID, "Test Product", 10.99, 2)
+
+	assert.Len(t, order.Items, 1)
+	assert.Equal(t, 21.98, order.TotalAmount)
+
+	item := order.Items[0]
+	assert.Equal(t, productID, item.ProductID)
+	assert.Equal(t, "Test Product", item.Name)
+	assert.Equal(t, 10.99, item.Price)
+	assert.Equal(t, 2, item.Quantity)
+	assert.Equal(t, 21.98, item.Total)
+}
+
+func TestOrder_RemoveItem(t *testing.T) {
+	order := NewOrder(uuid.New(), "test@example.com")
+
+	// Добавляем два элемента
+	order.AddItem(uuid.New(), "Product 1", 10.0, 1)
+	order.AddItem(uuid.New(), "Product 2", 20.0, 1)
+
+	assert.Len(t, order.Items, 2)
+	assert.Equal(t, 30.0, order.TotalAmount)
+
+	// Удаляем первый элемент
+	removed := order.RemoveItem(order.Items[0].ID)
+
+	assert.True(t, removed)
+	assert.Len(t, order.Items, 1)
+	assert.Equal(t, 20.0, order.TotalAmount)
+
+	// Пытаемся удалить несуществующий элемент
+	removed = order.RemoveItem(uuid.New())
+	assert.False(t, removed)
+}
+
+func TestOrder_UpdateStatus(t *testing.T) {
+	order := NewOrder(uuid.New(), "test@example.com")
+
+	// Валидный переход: pending -> confirmed
+	err := order.UpdateStatus(OrderStatusConfirmed)
+	assert.NoError(t, err)
+	assert.Equal(t, OrderStatusConfirmed, order.Status)
+
+	// Валидный переход: confirmed -> processing
+	err = order.UpdateStatus(OrderStatusProcessing)
+	assert.NoError(t, err)
+	assert.Equal(t, OrderStatusProcessing, order.Status)
+
+	// Невалидный переход: processing -> pending
+	err = order.UpdateStatus(OrderStatusPending)
+	assert.Error(t, err)
+	assert.Equal(t, OrderStatusProcessing, order.Status) // статус не изменился
+}
+
+func TestOrder_StatusTransitions(t *testing.T) {
+	order := NewOrder(uuid.New(), "test@example.com")
+
+	testCases := []struct {
+		currentStatus OrderStatus
+		targetStatus  OrderStatus
+		shouldSucceed bool
+	}{
+		{OrderStatusPending, OrderStatusConfirmed, true},
+		{OrderStatusPending, OrderStatusCancelled, true},
+		{OrderStatusPending, OrderStatusProcessing, false},
+		{OrderStatusConfirmed, OrderStatusProcessing, true},
+		{OrderStatusConfirmed, OrderStatusCancelled, true},
+		{OrderStatusProcessing, OrderStatusShipped, true},
+		{OrderStatusProcessing, OrderStatusCancelled, true},
+		{OrderStatusShipped, OrderStatusDelivered, true},
+		{OrderStatusShipped, OrderStatusCancelled, false},
+		{OrderStatusDelivered, OrderStatusRefunded, true},
+		{OrderStatusCancelled, OrderStatusPending, false},
+		{OrderStatusRefunded, OrderStatusPending, false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(string(tc.currentStatus)+"_to_"+string(tc.targetStatus), func(t *testing.T) {
+			order.Status = tc.currentStatus
+			err := order.UpdateStatus(tc.targetStatus)
+
+			if tc.shouldSucceed {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.targetStatus, order.Status)
+			} else {
+				assert.Error(t, err)
+				assert.Equal(t, tc.currentStatus, order.Status)
+			}
+		})
+	}
+}
+
+func TestOrder_IsActive(t *testing.T) {
+	order := NewOrder(uuid.New(), "test@example.com")
+
+	// Активные статусы
+	activeStatuses := []OrderStatus{
+		OrderStatusPending,
+		OrderStatusConfirmed,
+		OrderStatusProcessing,
+		OrderStatusShipped,
+	}
+
+	for _, status := range activeStatuses {
+		order.Status = status
+		assert.True(t, order.IsActive(), "Order should be active with status: %s", status)
+	}
+
+	// Неактивные статусы
+	inactiveStatuses := []OrderStatus{
+		OrderStatusDelivered,
+		OrderStatusCancelled,
+		OrderStatusRefunded,
+	}
+
+	for _, status := range inactiveStatuses {
+		order.Status = status
+		assert.False(t, order.IsActive(), "Order should not be active with status: %s", status)
+	}
+}
+
+func TestOrder_IsFinal(t *testing.T) {
+	order := NewOrder(uuid.New(), "test@example.com")
+
+	finalStatuses := []OrderStatus{
+		OrderStatusDelivered,
+		OrderStatusCancelled,
+		OrderStatusRefunded,
+	}
+
+	for _, status := range finalStatuses {
+		order.Status = status
+		assert.True(t, order.IsFinal(), "Order should be final with status: %s", status)
+	}
+
+	nonFinalStatuses := []OrderStatus{
+		OrderStatusPending,
+		OrderStatusConfirmed,
+		OrderStatusProcessing,
+		OrderStatusShipped,
+	}
+
+	for _, status := range nonFinalStatuses {
+		order.Status = status
+		assert.False(t, order.IsFinal(), "Order should not be final with status: %s", status)
+	}
+}
+
+func TestOrder_GetItemCount(t *testing.T) {
+	order := NewOrder(uuid.New(), "test@example.com")
+
+	assert.Equal(t, 0, order.GetItemCount())
+
+	order.AddItem(uuid.New(), "Product 1", 10.0, 2)
+	assert.Equal(t, 2, order.GetItemCount())
+
+	order.AddItem(uuid.New(), "Product 2", 20.0, 3)
+	assert.Equal(t, 5, order.GetItemCount())
+}
+
+func TestOrder_Validate(t *testing.T) {
+	t.Run("valid order", func(t *testing.T) {
+		order := NewOrder(uuid.New(), "test@example.com")
+		order.AddItem(uuid.New(), "Test Product", 10.0, 1)
+
+		err := order.Validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("empty order ID", func(t *testing.T) {
+		order := NewOrder(uuid.New(), "test@example.com")
+		order.ID = uuid.Nil
+
+		err := order.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "order ID cannot be empty")
+	})
+
+	t.Run("empty customer ID", func(t *testing.T) {
+		order := NewOrder(uuid.Nil, "test@example.com")
+
+		err := order.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "customer ID cannot be empty")
+	})
+
+	t.Run("empty email", func(t *testing.T) {
+		order := NewOrder(uuid.New(), "")
+
+		err := order.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "email cannot be empty")
+	})
+
+	t.Run("no items", func(t *testing.T) {
+		order := NewOrder(uuid.New(), "test@example.com")
+
+		err := order.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "order must have at least one item")
+	})
+
+	t.Run("zero total amount", func(t *testing.T) {
+		order := NewOrder(uuid.New(), "test@example.com")
+		order.AddItem(uuid.New(), "Free Product", 0, 1)
+
+		err := order.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "total amount must be greater than zero")
+	})
+}
+
+func TestOrderItem_Validate(t *testing.T) {
+	t.Run("valid item", func(t *testing.T) {
+		item := OrderItem{
+			ID:        uuid.New(),
+			OrderID:   uuid.New(),
+			ProductID: uuid.New(),
+			Name:      "Test Product",
+			Price:     10.99,
+			Quantity:  2,
+			Total:     21.98,
+		}
+
+		err := item.Validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid total calculation", func(t *testing.T) {
+		item := OrderItem{
+			ID:        uuid.New(),
+			OrderID:   uuid.New(),
+			ProductID: uuid.New(),
+			Name:      "Test Product",
+			Price:     10.0,
+			Quantity:  2,
+			Total:     15.0, // Неправильная сумма
+		}
+
+		err := item.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "doesn't match price * quantity")
+	})
+}
+
+func TestOrder_ToEvent(t *testing.T) {
+	order := NewOrder(uuid.New(), "test@example.com")
+	order.AddItem(uuid.New(), "Test Product", 10.0, 2)
+
+	event := order.ToEvent(EventOrderCreated)
+
+	assert.Equal(t, EventOrderCreated, event.EventType)
+	assert.Equal(t, order.ID, event.OrderID)
+	assert.Equal(t, order.CustomerID, event.CustomerID)
+	assert.Equal(t, order.Status, event.Status)
+	assert.Equal(t, order.TotalAmount, event.TotalAmount)
+	assert.Equal(t, order.Currency, event.Currency)
+	assert.NotEqual(t, uuid.Nil, event.EventID)
+	assert.WithinDuration(t, time.Now(), event.Timestamp, time.Second)
+	assert.Equal(t, order.Email, event.Data["email"])
+	assert.Equal(t, 2, event.Data["item_count"])
+}
